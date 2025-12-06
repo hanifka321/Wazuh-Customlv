@@ -4,9 +4,9 @@ import os
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, Iterable, List, Optional, Sequence, cast
 
-import yaml
+import yaml  # type: ignore[import]
 
 ENV_VAR_MAPPING_PATHS = "UEBA_MAPPING_PATHS"
 DEFAULT_MAPPING_PATH = Path("config/mappings/default.yml")
@@ -101,14 +101,14 @@ class ResolvedMapping:
             enrichment=dict(self.enrichment),
         )
 
-    def as_dict(self) -> Dict[str, Optional[str]]:
-        data = {
+    def as_dict(self) -> Dict[str, object]:
+        data: Dict[str, object] = {
             "entity_id": self.entity_id,
             "entity_type": self.entity_type,
             "severity": self.severity,
             "timestamp": self.timestamp,
+            "enrichment": dict(self.enrichment),
         }
-        data["enrichment"] = dict(self.enrichment)
         return data
 
 
@@ -214,6 +214,7 @@ class MappingLayer:
     selectors: List[MappingSelector]
     sources: Dict[str, SourceMapping]
     file_path: Path
+    excluded_entities: List[str] = field(default_factory=list)
 
     def apply(self, ctx: "MappingContext", resolved: ResolvedMapping) -> ResolvedMapping:
         updated = self.defaults.apply_to(resolved)
@@ -258,6 +259,7 @@ class MappingResolver:
         indexed.sort(key=lambda item: (item[1].priority.order, item[0]))
         self._layers = [layer for _, layer in indexed]
         self._validate_baseline()
+        self._excluded_entities = self._collect_excluded_entities()
 
     def _validate_baseline(self) -> None:
         ctx = MappingContext.from_inputs()
@@ -282,11 +284,31 @@ class MappingResolver:
         groups: Optional[Iterable[str]] = None,
         custom: Optional[Dict[str, str]] = None,
     ) -> ResolvedMapping:
-        ctx = MappingContext.from_inputs(source=source, rule_id=rule_id, groups=groups, custom=custom)
+        ctx = MappingContext.from_inputs(
+            source=source, rule_id=rule_id, groups=groups, custom=custom
+        )
         resolved = ResolvedMapping()
         for layer in self._layers:
             resolved = layer.apply(ctx, resolved)
         return resolved
+
+    def _collect_excluded_entities(self) -> List[str]:
+        """Collect all excluded entity patterns from all layers."""
+        all_patterns: List[str] = []
+        for layer in self._layers:
+            all_patterns.extend(layer.excluded_entities)
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_patterns = []
+        for pattern in all_patterns:
+            if pattern not in seen:
+                seen.add(pattern)
+                unique_patterns.append(pattern)
+        return unique_patterns
+
+    def get_excluded_entities(self) -> List[str]:
+        """Get all excluded entity patterns."""
+        return list(self._excluded_entities)
 
 
 def load(paths: Optional[Sequence[os.PathLike[str] | str]] = None) -> MappingResolver:
@@ -354,6 +376,7 @@ def _parse_mapping_file(path: Path) -> MappingLayer:
 
     selectors = _parse_selectors(raw.get("selectors"), path, forced_source=None)
     sources = _parse_sources(raw.get("sources"), path)
+    excluded_entities = _parse_excluded_entities(raw.get("excluded_entities"), path)
 
     return MappingLayer(
         name=layer_name,
@@ -362,14 +385,40 @@ def _parse_mapping_file(path: Path) -> MappingLayer:
         selectors=selectors,
         sources=sources,
         file_path=path,
+        excluded_entities=excluded_entities,
     )
+
+
+def _parse_excluded_entities(value: object, path: Path) -> List[str]:
+    """Parse excluded_entities section from YAML."""
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise MappingValidationError(
+            "excluded_entities must be a list",
+            file_path=path,
+            line=_get_line(value),
+        )
+
+    patterns: List[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise MappingValidationError(
+                f"excluded_entities items must be strings, got {type(item).__name__}",
+                file_path=path,
+                line=_get_line(value),
+            )
+        patterns.append(item)
+    return patterns
 
 
 def _parse_sources(value: object, path: Path) -> Dict[str, SourceMapping]:
     if value is None:
         return {}
     if not isinstance(value, dict):
-        raise MappingValidationError("sources section must be a dictionary", file_path=path, line=_get_line(value))
+        raise MappingValidationError(
+            "sources section must be a dictionary", file_path=path, line=_get_line(value)
+        )
 
     sources: Dict[str, SourceMapping] = {}
     for source_name, source_body in value.items():
@@ -380,7 +429,11 @@ def _parse_sources(value: object, path: Path) -> Dict[str, SourceMapping]:
                 line=_get_line(source_body),
             )
         defaults_node = source_body.get("defaults")
-        defaults = _parse_field_set(defaults_node, path, f"source '{source_name}' defaults") if defaults_node is not None else None
+        defaults = (
+            _parse_field_set(defaults_node, path, f"source '{source_name}' defaults")
+            if defaults_node is not None
+            else None
+        )
         selectors = _parse_selectors(source_body.get("selectors"), path, forced_source=source_name)
         sources[source_name] = SourceMapping(
             name=str(source_name),
@@ -392,7 +445,9 @@ def _parse_sources(value: object, path: Path) -> Dict[str, SourceMapping]:
     return sources
 
 
-def _parse_selectors(value: object, path: Path, forced_source: Optional[str]) -> List[MappingSelector]:
+def _parse_selectors(
+    value: object, path: Path, forced_source: Optional[str]
+) -> List[MappingSelector]:
     if value is None:
         return []
     if not isinstance(value, list):
@@ -446,7 +501,9 @@ def _parse_selectors(value: object, path: Path, forced_source: Optional[str]) ->
 
 def _parse_match(value: object, path: Path, forced_source: Optional[str]) -> SelectorMatch:
     if not isinstance(value, dict):
-        raise MappingValidationError("match block must be a dictionary", file_path=path, line=_get_line(value))
+        raise MappingValidationError(
+            "match block must be a dictionary", file_path=path, line=_get_line(value)
+        )
     source = value.get("source")
     if forced_source:
         source = forced_source
@@ -493,17 +550,19 @@ def _parse_field_set(value: object, path: Path, context: str) -> PartialFieldSet
     provided_fields: set[str] = set()
     field_kwargs = {field: None for field in CANONICAL_FIELDS}
 
-    for field in CANONICAL_FIELDS:
-        if field in value:
-            provided_fields.add(field)
-            raw_value = value[field]
+    for canonical_field in CANONICAL_FIELDS:
+        if canonical_field in value:
+            provided_fields.add(canonical_field)
+            raw_value = value[canonical_field]
             if raw_value is not None and not isinstance(raw_value, (str, int, float)):
                 raise MappingValidationError(
-                    f"{context}.{field} must be a scalar",
+                    f"{context}.{canonical_field} must be a scalar",
                     file_path=path,
                     line=_get_line(value),
                 )
-            field_kwargs[field] = str(raw_value) if isinstance(raw_value, (int, float)) else raw_value
+            field_kwargs[canonical_field] = (
+                str(raw_value) if isinstance(raw_value, (int, float)) else raw_value
+            )
 
     enrichment_value = value.get("enrichment")
     enrichment: Optional[Dict[str, Optional[str]]] = None
@@ -527,7 +586,9 @@ def _parse_field_set(value: object, path: Path, context: str) -> PartialFieldSet
                         line=_get_line(enrichment_value),
                     )
                 enrichment[str(key)] = (
-                    str(raw) if isinstance(raw, (int, float)) else raw
+                    str(raw)
+                    if isinstance(raw, (int, float))
+                    else (raw if raw is not None else None)
                 )
 
     allowed_keys = set(CANONICAL_FIELDS) | {"enrichment"}
@@ -551,7 +612,9 @@ def _parse_field_set(value: object, path: Path, context: str) -> PartialFieldSet
     )
 
 
-def _select_best_selector(selectors: Iterable[MappingSelector], ctx: MappingContext) -> Optional[MappingSelector]:
+def _select_best_selector(
+    selectors: Iterable[MappingSelector], ctx: MappingContext
+) -> Optional[MappingSelector]:
     best: Optional[MappingSelector] = None
     best_rank = -1
     for selector in selectors:

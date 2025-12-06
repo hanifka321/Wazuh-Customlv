@@ -8,7 +8,8 @@ from typing import Dict, List, Optional, Sequence, Tuple, TYPE_CHECKING
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ueba.db.models import EntityRiskHistory, NormalizedEvent
+from ueba.db.models import Entity, EntityRiskHistory, NormalizedEvent
+from ueba.services.mapper.utils import is_entity_excluded
 
 if TYPE_CHECKING:  # pragma: no cover
     from .pipeline import AnalyzerResult
@@ -42,8 +43,9 @@ class AnalyzerRepository:
     REASON_GENERATOR = "analyzer_service"
     REASON_KIND = "daily_rollup"
 
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, excluded_entities: Optional[Sequence[str]] = None):
         self.session = session
+        self._excluded_entities = list(excluded_entities or [])
 
     # ------------------------------------------------------------------
     # Normalized event queries
@@ -53,10 +55,16 @@ class AnalyzerRepository:
         since: Optional[datetime] = None,
         until: Optional[datetime] = None,
     ) -> List[EntityEventWindow]:
-        stmt = select(NormalizedEvent).where(
-            NormalizedEvent.entity_id.is_not(None),
-            NormalizedEvent.deleted_at.is_(None),
-            NormalizedEvent.status == "active",
+        stmt = (
+            select(NormalizedEvent, Entity.entity_value)
+            .join(Entity, Entity.id == NormalizedEvent.entity_id)
+            .where(
+                NormalizedEvent.entity_id.is_not(None),
+                NormalizedEvent.deleted_at.is_(None),
+                NormalizedEvent.status == "active",
+                Entity.deleted_at.is_(None),
+                Entity.status == "active",
+            )
         )
 
         if since is not None:
@@ -66,14 +74,23 @@ class AnalyzerRepository:
 
         stmt = stmt.order_by(NormalizedEvent.entity_id, NormalizedEvent.observed_at)
 
-        events: Sequence[NormalizedEvent] = self.session.execute(stmt).scalars().all()
+        rows = self.session.execute(stmt).all()
         grouped: Dict[Tuple[int, datetime], List[NormalizedEvent]] = {}
+        exclusion_cache: Dict[int, bool] = {}
 
-        for event in events:
+        for event, entity_value in rows:
             if event.entity_id is None:
                 continue
+
+            entity_id = event.entity_id
+            if entity_id not in exclusion_cache:
+                exclusion_cache[entity_id] = self._is_entity_value_excluded(entity_value)
+
+            if exclusion_cache[entity_id]:
+                continue
+
             start, _ = window_bounds(event.observed_at)
-            key = (event.entity_id, start)
+            key = (entity_id, start)
             grouped.setdefault(key, [])
             grouped[key].append(event)
 
@@ -84,10 +101,16 @@ class AnalyzerRepository:
                 window_end=window_start + timedelta(days=1),
                 events=grouped[(entity_id, window_start)],
             )
-            for (entity_id, window_start) in sorted(grouped.keys(), key=lambda item: (item[0], item[1]))
+            for (entity_id, window_start) in sorted(
+                grouped.keys(), key=lambda item: (item[0], item[1])
+            )
         ]
 
         return windows
+
+    def _is_entity_value_excluded(self, entity_value: str) -> bool:
+        """Check if an entity value matches any exclusion patterns."""
+        return is_entity_excluded(entity_value, self._excluded_entities)
 
     # ------------------------------------------------------------------
     # Entity risk history helpers
