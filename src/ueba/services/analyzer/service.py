@@ -3,8 +3,9 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional, Sequence
 
+from ueba.config.mapping_loader import MappingLoaderError, load as load_mappings
 from ueba.db.base import get_session_factory
 from ueba.logging import AlertLogger
 
@@ -29,10 +30,24 @@ class AnalyzerService:
         session_factory=None,
         pipeline: Optional[AnalyzerPipeline] = None,
         alert_logger: Optional[AlertLogger] = None,
+        excluded_entities: Optional[Sequence[str]] = None,
     ):
         self.session_factory = session_factory or get_session_factory()
         self.pipeline = pipeline or AnalyzerPipeline()
         self.alert_logger = alert_logger or AlertLogger()
+        if excluded_entities is not None:
+            self._excluded_entities = list(excluded_entities)
+        else:
+            self._excluded_entities = self._load_excluded_entities_from_mapping()
+
+    def _load_excluded_entities_from_mapping(self) -> List[str]:
+        """Load excluded entities from mapping configuration."""
+        try:
+            resolver = load_mappings()
+            return resolver.get_excluded_entities()
+        except MappingLoaderError:
+            logger.warning("Could not load mapping configuration for excluded entities")
+            return []
 
     def run_once(
         self,
@@ -44,7 +59,7 @@ class AnalyzerService:
         until = until or default_until()
 
         with self.session_factory() as session:
-            repository = AnalyzerRepository(session)
+            repository = AnalyzerRepository(session, excluded_entities=self._excluded_entities)
             baseline = BaselineCalculator(session)
 
             # Determine checkpoint

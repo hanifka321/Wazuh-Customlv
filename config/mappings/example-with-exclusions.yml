@@ -1,14 +1,19 @@
 metadata:
-  name: default-wazuh-mapping
+  name: example-wazuh-mapping-with-exclusions
 priority: global
 
-# Entities that should never be persisted. Supports exact strings and wildcards
-# (e.g., "system_*" will drop any entity that starts with "system_").
+# Entity exclusions - these entities will not be stored in the database
+# Supports:
+# - Exact matches (e.g., "root", "admin")
+# - Wildcard patterns (e.g., "system_*", "service_*", "SYSTEM")
 excluded_entities:
   - root
   - admin
-  - service_*
+  - administrator
   - system_*
+  - service_*
+  - SYSTEM
+  - NT AUTHORITY*
 
 # Canonical mappings shared by every alert unless overridden
 defaults:

@@ -268,6 +268,9 @@ Each mapping file supports the following top-level sections:
 
 - `metadata.name` – friendly identifier for troubleshooting.
 - `priority` – one of `global`, `integration`, or `emergency_override`.
+- `excluded_entities` – optional list of entity values to ignore entirely. Supports exact
+  matches (`"root"`, `"admin"`) and Unix-style wildcards (`"system_*"`, `"service_*"`).
+  Excluded entities are never upserted by the mapper and are filtered out by the analyzer.
 - `defaults` – canonical field definitions (entity_id, entity_type, severity, timestamp,
   and optional enrichment key/value pairs).
 - `selectors` – optional overrides that match on `rule_id`, `group`, or custom key/value
@@ -283,6 +286,13 @@ Example snippet:
 metadata:
   name: default-wazuh
 priority: global
+
+# Optional: Exclude service accounts and system entities
+excluded_entities:
+  - root
+  - admin
+  - system_*
+  - service_*
 
 defaults:
   entity_id: agent.id
@@ -304,6 +314,8 @@ sources:
           entity_type: user
           entity_id: data.srcuser
 ```
+
+A more complete, commented example lives at `config/mappings/example-with-exclusions.yml`.
 
 To add a new mapping file, drop it in `config/mappings/` (or any accessible directory)
 and set `UEBA_MAPPING_PATHS` to include its path. Files later in the list override fields

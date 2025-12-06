@@ -14,7 +14,13 @@ from .persistence import (
     PersistenceManager,
     RawAlertPayload,
 )
-from .utils import compute_alert_hash, convert_to_int, get_nested_value, parse_iso_timestamp
+from .utils import (
+    compute_alert_hash,
+    convert_to_int,
+    get_nested_value,
+    is_entity_excluded,
+    parse_iso_timestamp,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +45,7 @@ class AlertMapper:
 
     def __init__(self, resolver: MappingResolver) -> None:
         self.resolver = resolver
+        self._excluded_entities = resolver.get_excluded_entities()
 
     def _resolve_mapping_value(
         self, alert: Dict[str, Any], path: Optional[str], metrics: MappingMetrics
@@ -114,7 +121,8 @@ class AlertMapper:
             entity_payload = EntityPayload(
                 entity_type=entity_type_value,
                 entity_value=str(entity_id_value),
-                display_name=enrichment_context.get("agent_name") or enrichment_context.get("username"),
+                display_name=enrichment_context.get("agent_name")
+                or enrichment_context.get("username"),
                 attributes=enrichment_context,
             )
 
@@ -175,10 +183,19 @@ class AlertMapper:
 
         entity = None
         if mapped.entity_payload:
-            entity = persistence.upsert_entity(mapped.entity_payload)
-            logger.debug(f"Upserted entity: {entity.entity_type}/{entity.entity_value} (id={entity.id})")
-            mapped.raw_alert_payload.entity_id = entity.id
-            mapped.normalized_event_payload.entity_id = entity.id
+            # Check if entity is excluded
+            if is_entity_excluded(mapped.entity_payload.entity_value, self._excluded_entities):
+                logger.debug(
+                    f"Skipping excluded entity: {mapped.entity_payload.entity_type}/"
+                    f"{mapped.entity_payload.entity_value}"
+                )
+            else:
+                entity = persistence.upsert_entity(mapped.entity_payload)
+                logger.debug(
+                    f"Upserted entity: {entity.entity_type}/{entity.entity_value} (id={entity.id})"
+                )
+                mapped.raw_alert_payload.entity_id = entity.id
+                mapped.normalized_event_payload.entity_id = entity.id
 
         raw_alert, was_duplicate = persistence.persist_raw_alert(mapped.raw_alert_payload)
         if was_duplicate:
