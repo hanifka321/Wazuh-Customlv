@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional
 import os
-import yaml
+import yaml  # type: ignore
 from .models import Rule
 
 

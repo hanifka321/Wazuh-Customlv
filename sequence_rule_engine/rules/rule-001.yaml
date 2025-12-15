@@ -1,0 +1,17 @@
+id: rule-001
+name: SSH Brute Force followed by Successful Login
+by:
+- data.srcip
+within_seconds: 300
+sequence:
+- as: failed_login
+  where: rule.id == "5710"
+- as: failed_login2
+  where: rule.id == "5710"
+- as: failed_login3
+  where: rule.id == "5710"
+- as: success_login
+  where: rule.id == "5715"
+output:
+  format: Detected brute force sequence from {data.srcip}
+  timestamp_ref: success_login
